@@ -18,17 +18,22 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
-            // 获取所有 release，并筛选 tag_name 包含 "arm64" 的最新版本
+            // 获取所有 release，并筛选 tag_name 包含 "arm64" 的版本
             const releases = await github.rest.repos.listReleases({
               owner: "elseif",
               repo: "MikroTikPatch"
             });
-            const latestArm64 = releases.data.find(release => release.tag_name.includes("arm64"));
-            if (!latestArm64) {
+            const arm64Releases = releases.data.filter(release => release.tag_name.includes("arm64"));
+            if (arm64Releases.length === 0) {
               core.setFailed("No ARM64 release found");
             }
+            // 按发布时间降序排序，确保第一个为最新版本
+            arm64Releases.sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
+            const latestArm64 = arm64Releases[0];
+            core.info(`Latest ARM64 release: ${latestArm64.tag_name}`);
+            
+            // 尝试读取仓库中的 latest_version.txt 进行比对
             let buildNeeded = "true";
-            // 尝试获取仓库中的 latest_version.txt 以判断是否有更新
             try {
               const { data: contentData } = await github.rest.repos.getContent({
                 owner: context.repo.owner,
@@ -37,13 +42,12 @@ jobs:
               });
               const currentVersion = Buffer.from(contentData.content, 'base64').toString().trim();
               if (currentVersion === latestArm64.tag_name) {
-                core.info("Version unchanged, skipping build.");
+                core.info("当前 release 版本已构建，无需重复构建。");
                 buildNeeded = "false";
               }
             } catch (error) {
-              core.info("latest_version.txt not found, proceeding with build.");
+              core.info("未找到 latest_version.txt，开始构建。");
             }
-            core.info(`Latest ARM64 release: ${latestArm64.tag_name}`);
             core.setOutput("version", latestArm64.tag_name);
             core.setOutput("build_needed", buildNeeded);
 
