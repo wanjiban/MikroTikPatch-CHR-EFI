@@ -73,12 +73,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Cache apt lists
-        uses: actions/cache@v3
-        with:
-          path: /var/lib/apt/lists
-          key: ${{ runner.os }}-apt-lists
-
       - name: Initialize environment
         run: |
           sudo apt update
