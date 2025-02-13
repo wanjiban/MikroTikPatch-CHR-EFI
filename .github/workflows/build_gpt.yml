@@ -18,35 +18,42 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
-            // 获取所有 release，并筛选 tag_name 包含 "arm64" 的版本
+            // 获取 MikroTikPatch 仓库中所有 release，并筛选 tag_name 包含 "arm64" 的版本
             const releases = await github.rest.repos.listReleases({
               owner: "elseif",
               repo: "MikroTikPatch"
             });
             const arm64Releases = releases.data.filter(release => release.tag_name.includes("arm64"));
             if (arm64Releases.length === 0) {
-              core.setFailed("No ARM64 release found");
+              core.setFailed("No ARM64 release found in MikroTikPatch repository");
             }
             // 按发布时间降序排序，确保第一个为最新版本
             arm64Releases.sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
             const latestArm64 = arm64Releases[0];
-            core.info(`Latest ARM64 release: ${latestArm64.tag_name}`);
-            
-            // 尝试读取仓库中的 latest_version.txt 进行比对
+            core.info(`Latest ARM64 release from MikroTikPatch: ${latestArm64.tag_name}`);
+
+            // 从当前仓库的 release 列表中获取最新发布记录
             let buildNeeded = "true";
             try {
-              const { data: contentData } = await github.rest.repos.getContent({
+              const currentReleases = await github.rest.repos.listReleases({
                 owner: context.repo.owner,
-                repo: context.repo.repo,
-                path: "latest_version.txt"
+                repo: context.repo.repo
               });
-              const currentVersion = Buffer.from(contentData.content, 'base64').toString().trim();
-              if (currentVersion === latestArm64.tag_name) {
-                core.info("当前 release 版本已构建，无需重复构建。");
-                buildNeeded = "false";
+              if (currentReleases.data.length > 0) {
+                // 按发布时间降序排序，获取最新的 release
+                currentReleases.data.sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
+                const latestCurrent = currentReleases.data[0];
+                core.info(`Latest release in current repository: ${latestCurrent.tag_name}`);
+                // 可根据实际情况对比 tag，比如上传时生成的 tag 带有 _GPT 后缀
+                if (latestCurrent.tag_name === latestArm64.tag_name || latestCurrent.tag_name === `${latestArm64.tag_name}_GPT`) {
+                  core.info("当前仓库 release 已包含最新的 ARM64 版本，无需重复构建。");
+                  buildNeeded = "false";
+                }
+              } else {
+                core.info("当前仓库没有 release，将进行构建。");
               }
             } catch (error) {
-              core.info("未找到 latest_version.txt，开始构建。");
+              core.info("获取当前仓库 release 信息失败，将进行构建。");
             }
             core.setOutput("version", latestArm64.tag_name);
             core.setOutput("build_needed", buildNeeded);
