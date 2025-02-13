@@ -2,19 +2,13 @@ name: build GPT
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: read
+  schedule:
+    - cron: "0 0 * * 4"
 
 jobs:
   build:
-    permissions:
-      contents: write # for release creation
-
     name: Build ${{matrix.version}}
-
     runs-on: ubuntu-latest
-
     if: github.event.repository.owner.id == github.event.sender.id || ! github.event.sender.id
 
     strategy:
