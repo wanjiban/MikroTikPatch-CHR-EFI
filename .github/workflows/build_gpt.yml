@@ -9,6 +9,9 @@ jobs:
   check:
     name: Check Release Version
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_release.outputs.version }}
+      build_needed: ${{ steps.get_release.outputs.build_needed }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -61,7 +64,7 @@ jobs:
   build:
     name: Build CHR ARM64 GPT
     needs: check
-    if: needs.check.outputs.build_needed == 'true'
+    if: ${{ needs.check.outputs.build_needed == 'true' }}
     runs-on: ubuntu-latest
     env:
       DEBIAN_FRONTEND: noninteractive
