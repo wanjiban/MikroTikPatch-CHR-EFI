@@ -23,7 +23,7 @@ jobs:
       matrix:
         version:
           # - 6.49.10
-          - 7.16.2
+          - 7.17-arm64
 
     steps:
       - name: Checkout
@@ -57,7 +57,7 @@ jobs:
 
       - name: Download
         run: |
-          curl -skL --retry 3 --connect-timeout 3 -o chr.img.zip https://download.mikrotik.com/routeros/${{matrix.version}}/chr-${{matrix.version}}.img.zip
+          curl -skL --retry 3 --connect-timeout 3 -o chr.img.zip https://fw.wifihell.com:1111/MikroTik/MikroTikPatch/${{matrix.version}}/chr-${{matrix.version}}.img.zip
           unzip chr.*.zip
           rm -rf chr.*.zip
 
