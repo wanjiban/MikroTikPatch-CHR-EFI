@@ -28,7 +28,7 @@ jobs:
               core.setFailed("No ARM64 release found");
             }
             let buildNeeded = "true";
-            // 尝试获取仓库中的 latest_version.txt
+            // 尝试获取仓库中的 latest_version.txt 以判断是否有更新
             try {
               const { data: contentData } = await github.rest.repos.getContent({
                 owner: context.repo.owner,
@@ -59,4 +59,131 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Cache apt list
+      - name: Cache apt lists
+        uses: actions/cache@v3
+        with:
+          path: /var/lib/apt/lists
+          key: ${{ runner.os }}-apt-lists
+
+      - name: Initialize environment
+        run: |
+          sudo apt update
+          sudo apt -y install curl qemu-utils rsync unzip zip lshw
+          sudo timedatectl set-timezone "${TZ}"
+
+      - name: Check server configuration
+        run: |
+          echo "--------------------------CPU Info--------------------------"
+          echo "CPU Physical Num: $(grep 'physical id' /proc/cpuinfo | sort -u | wc -l)"
+          echo "CPU Core Num: $(grep 'model name' /proc/cpuinfo | uniq -c)"
+          echo "--------------------------Memory Info--------------------------"
+          sudo lshw -short -C memory | grep GiB || echo "Memory info not available"
+          echo "---------------------------Disk Info---------------------------"
+          echo "Disk Num: $(ls /dev/sd* 2>/dev/null | grep -v [1-9] | wc -l)"
+          df -Th || echo "Disk info not available"
+
+      - name: Load nbd module
+        run: sudo modprobe nbd
+
+      - name: Download release image
+        run: |
+          VERSION=${{ needs.check.outputs.version }}
+          echo "Downloading version $VERSION"
+          curl -skL --retry 3 --connect-timeout 3 \
+            -o chr.img.zip \
+            https://github.com/elseif/MikroTikPatch/releases/download/${VERSION}/chr-${VERSION}.img.zip
+          unzip chr.img.zip
+          rm -f chr.img.zip
+
+      - name: Convert to qcow2
+        run: |
+          qemu-img convert -f raw -O qcow2 chr-*.img chr.qcow2
+          cp -af chr.qcow2 chr-efi.qcow2
+          rm -f chr-*.img
+
+      - name: Connect nbd devices
+        run: |
+          sudo qemu-nbd -c /dev/nbd0 chr.qcow2
+          sudo qemu-nbd -c /dev/nbd1 chr-efi.qcow2
+
+      - name: Format boot partition
+        run: sudo mkfs.fat -F 32 /dev/nbd1p1
+
+      - name: Mount partitions and sync files
+        run: |
+          sudo mkdir -p /tmp/chr-bios /tmp/chr-efi
+          sudo mount /dev/nbd0p1 /tmp/chr-bios
+          sudo mount /dev/nbd1p1 /tmp/chr-efi
+          sudo rsync -a /tmp/chr-bios/ /tmp/chr-efi/
+          sudo umount /dev/nbd0p1
+          sudo umount /dev/nbd1p1
+          sudo rm -rf /tmp/chr-bios /tmp/chr-efi
+
+      - name: Modify partition table
+        run: |
+          (
+          echo 2    # 使用 GPT
+          echo t    # 修改分区代码
+          echo 1    # 选择第1分区
+          echo 8300 # 改为 Linux 文件系统
+          echo r    # 进入恢复/转换模式
+          echo h    # 设置 Hybrid MBR
+          echo 1 2  # 添加分区到 Hybrid MBR
+          echo n    # 将 EFI GPT 分区放在 MBR 首位
+          echo     # 默认
+          echo y    # 设置启动标志
+          echo     # 默认
+          echo n    # 不设置其他启动标志
+          echo n    # 对未使用空间不做额外保护
+          echo w    # 写入更改
+          echo y    # 确认更改
+          ) | sudo -E gdisk /dev/nbd1
+
+      - name: Disconnect nbd devices
+        run: |
+          sudo qemu-nbd -d /dev/nbd0
+          sudo qemu-nbd -d /dev/nbd1
+
+      - name: Convert images for release
+        run: |
+          mkdir -p Firmware
+          cp -f chr-efi.qcow2 Firmware/
+          qemu-img convert -f qcow2 -O vmdk Firmware/chr-efi.qcow2 Firmware/chr-efi.vmdk
+          qemu-img convert -f qcow2 -O vpc   Firmware/chr-efi.qcow2 Firmware/chr-efi.vhd
+          qemu-img convert -f qcow2 -O vhdx  Firmware/chr-efi.qcow2 Firmware/chr-efi.vhdx
+          qemu-img convert -f qcow2 -O vdi   Firmware/chr-efi.qcow2 Firmware/chr-efi.vdi
+          qemu-img convert -f qcow2 -O raw   Firmware/chr-efi.qcow2 Firmware/chr-efi.img
+          ls -l Firmware
+
+      - name: Zip images
+        run: |
+          VERSION=${{ needs.check.outputs.version }}
+          cd Firmware
+          zip chr-${VERSION}.qcow2.zip chr-efi.qcow2
+          zip chr-${VERSION}.vmdk.zip chr-efi.vmdk
+          zip chr-${VERSION}.vhd.zip chr-efi.vhd
+          zip chr-${VERSION}.vhdx.zip chr-efi.vhdx
+          zip chr-${VERSION}.vdi.zip chr-efi.vdi
+          zip chr-${VERSION}.img.zip chr-efi.img
+          ls -l .
+
+      - name: Upload Firmware to release
+        uses: ncipollo/release-action@v1
+        with:
+          name: ${{ needs.check.outputs.version }}_GPT
+          allowUpdates: true
+          removeArtifacts: true
+          tag: ${{ needs.check.outputs.version }}_GPT
+          commit: master
+          token: ${{ secrets.PERSONAL_TOKEN }}
+          artifacts: Firmware/*.zip
+
+      - name: Update latest_version.txt
+        run: |
+          VERSION=${{ needs.check.outputs.version }}
+          echo $VERSION > latest_version.txt
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add latest_version.txt
+          git commit -m "Update latest version to $VERSION" || echo "No changes to update"
+          git push origin HEAD:master
