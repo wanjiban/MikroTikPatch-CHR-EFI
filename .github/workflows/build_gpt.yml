@@ -100,21 +100,64 @@ jobs:
       - name: Remove tmp dir
         run: sudo rm -rf /tmp/chr*
 
-      - name: Modify partition table
+      - name: modify partition table
         run: |
           (
-          echo 2     # 使用 GPT
-          echo t     # 修改分区代码
-          echo 1     # 选择第一个分区
-          echo 8300  # 修改代码为 Linux 文件系统 8300
-          echo r     # Recovery/transformation
-          echo h     # Hybrid MBR
-          echo 1 2   # 添加分区到 Hybrid MBR
-          echo n     # 将 EFI GPT (0xEE) 分区放到 MBR 首位？(Y/N)
-          echo       # 默认 MBR 十六进制代码 83
-          echo y     # 设置可启动标志？(Y/N)
-          echo       # 默认 MBR 十六进制代码 83
-          echo n     # 不设置可启动标志？(Y/N)
-          echo n     # 未使用的分区空间保护更多分区？(Y/N)
-          echo w     # 写入更改
-          echo y 
+          echo 2 # use GPT
+          echo t # change partition code
+          echo 1 # select first partition
+          echo 8300 # change code to Linux filesystem 8300
+          echo r # Recovery/transformation
+          echo h # Hybrid MBR
+          echo 1 2 # partitions added to the hybrid MBR
+          echo n # Place EFI GPT (0xEE) partition first in MBR (good for GRUB)? (Y/N)
+          echo   # Enter an MBR hex code (default 83)
+          echo y # Set the bootable flag? (Y/N)
+          echo   # Enter an MBR hex code (default 83)
+          echo n # Set the bootable flag? (Y/N)
+          echo n # Unused partition space(s) found. Use one to protect more partitions? (Y/N)
+          echo w # write changes to disk
+          echo y # confirm
+          ) | sudo -E gdisk /dev/nbd1
+
+      - name: Disconnect ndb
+        run: |
+          sudo -E qemu-nbd -d /dev/nbd0
+          sudo -E qemu-nbd -d /dev/nbd1
+
+      - name: Remove old
+        run: |
+          rm -rf chr.qcow2
+
+      - name: Convert images
+        run: |
+          mkdir -p ./Firmware/
+          cp -f chr-efi.qcow2 ./Firmware/
+          qemu-img convert -f qcow2 -O vmdk chr-efi.qcow2 ./Firmware/chr-efi.vmdk
+          qemu-img convert -f qcow2 -O vpc chr-efi.qcow2 ./Firmware/chr-efi.vhd
+          qemu-img convert -f qcow2 -O vhdx chr-efi.qcow2 ./Firmware/chr-efi.vhdx
+          qemu-img convert -f qcow2 -O vdi chr-efi.qcow2 ./Firmware/chr-efi.vdi
+          qemu-img convert -f qcow2 -O raw chr-efi.qcow2 ./Firmware/chr-efi.img
+          ls -l ./Firmware
+
+      - name: Zip images
+        run: |
+          cd ./Firmware/
+          zip chr-${{matrix.version}}.qcow2.zip chr-efi.qcow2
+          zip chr-${{matrix.version}}.vmdk.zip chr-efi.vmdk
+          zip chr-${{matrix.version}}.vhd.zip chr-efi.vhd
+          zip chr-${{matrix.version}}.vhdx.zip chr-efi.vhdx
+          zip chr-${{matrix.version}}.vdi.zip chr-efi.vdi
+          zip chr-${{matrix.version}}.img.zip chr-efi.img
+          ls -l ./
+
+      - name: Upload Firmware to release
+        uses: ncipollo/release-action@v1
+        with:
+          name: ${{matrix.version}}_GPT
+          allowUpdates: true
+          removeArtifacts: true
+          tag: ${{matrix.version}}_GPT
+          commit: master
+          token: ${{ secrets.PERSONAL_TOKEN }}
+          artifacts: ./Firmware/*.zip
