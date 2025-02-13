@@ -1,18 +1,16 @@
-name: build GPT
+name: build GPT ARM64
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 0 * * 4"
+    - cron: "0 0 * * 4"  # 每周四午夜触发
 
 jobs:
-  build:
-    name: Build 
+  check:
+    name: Check Release Version
     runs-on: ubuntu-latest
-    if: github.event.repository.owner.id == github.event.sender.id || !github.event.sender.id
-
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Get latest ARM64 release version
@@ -29,135 +27,36 @@ jobs:
             if (!latestArm64) {
               core.setFailed("No ARM64 release found");
             }
+            let buildNeeded = "true";
+            // 尝试获取仓库中的 latest_version.txt
+            try {
+              const { data: contentData } = await github.rest.repos.getContent({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                path: "latest_version.txt"
+              });
+              const currentVersion = Buffer.from(contentData.content, 'base64').toString().trim();
+              if (currentVersion === latestArm64.tag_name) {
+                core.info("Version unchanged, skipping build.");
+                buildNeeded = "false";
+              }
+            } catch (error) {
+              core.info("latest_version.txt not found, proceeding with build.");
+            }
             core.info(`Latest ARM64 release: ${latestArm64.tag_name}`);
-            // 显式设置输出变量
             core.setOutput("version", latestArm64.tag_name);
+            core.setOutput("build_needed", buildNeeded);
 
-      - name: Check server configuration
-        run: |
-          echo -e "--------------------------CPU Info--------------------------"
-          echo "CPU Physical Num: $(grep 'physical id' /proc/cpuinfo | sort -u | wc -l)"
-          echo -e "CPU Core Num: $(grep 'model name' /proc/cpuinfo | uniq -c) \n"
-          echo "--------------------------Memory Info--------------------------"
-          echo "Installed Memory Details:"
-          sudo lshw -short -C memory | grep GiB
-          echo -e "\n---------------------------Disk Info---------------------------"
-          echo -e "Disk Num: $(ls /dev/sd* | grep -v [1-9] | wc -l) \n"
-          df -Th
+  build:
+    name: Build CHR ARM64 GPT
+    needs: check
+    if: needs.check.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Asia/Shanghai
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Initialize environment
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          sudo apt update
-          sudo apt -y install curl qemu-utils rsync unzip zip
-          sudo timedatectl set-timezone "Asia/Shanghai"
-
-      - name: Load nbd module
-        run: sudo modprobe nbd
-
-      - name: Download
-        run: |
-          echo "Downloading version ${{ steps.get_release.outputs.version }}"
-          curl -skL --retry 3 --connect-timeout 3 \
-            -o chr.img.zip \
-            https://github.com/elseif/MikroTikPatch/releases/download/${{ steps.get_release.outputs.version }}/chr-${{ steps.get_release.outputs.version }}.img.zip
-          unzip chr.img.zip
-          rm -f chr.img.zip
-
-      - name: Convert to qcow2
-        run: |
-          qemu-img convert -f raw -O qcow2 chr-*.img chr.qcow2
-          cp -af chr.qcow2 chr-efi.qcow2
-          rm -f chr-*.img
-
-      - name: Connect nbd
-        run: |
-          sudo qemu-nbd -c /dev/nbd0 chr.qcow2
-          sudo qemu-nbd -c /dev/nbd1 chr-efi.qcow2
-
-      - name: Format boot partition
-        run: sudo mkfs -t fat /dev/nbd1p1
-
-      - name: Create tmp dir
-        run: |
-          sudo rm -rf /tmp/chr*
-          sudo mkdir -p /tmp/chr-bios/ /tmp/chr-efi/
-
-      - name: Mount
-        run: |
-          sudo mount /dev/nbd0p1 /tmp/chr-bios/
-          sudo mount /dev/nbd1p1 /tmp/chr-efi/
-
-      - name: Sync files
-        run: sudo rsync -a /tmp/chr-bios/ /tmp/chr-efi/
-
-      - name: Umount
-        run: |
-          sudo umount /dev/nbd0p1
-          sudo umount /dev/nbd1p1
-
-      - name: Remove tmp dir
-        run: sudo rm -rf /tmp/chr*
-
-      - name: modify partition table
-        run: |
-          (
-          echo 2 # use GPT
-          echo t # change partition code
-          echo 1 # select first partition
-          echo 8300 # change code to Linux filesystem 8300
-          echo r # Recovery/transformation
-          echo h # Hybrid MBR
-          echo 1 2 # partitions added to the hybrid MBR
-          echo n # Place EFI GPT (0xEE) partition first in MBR (good for GRUB)? (Y/N)
-          echo   # Enter an MBR hex code (default 83)
-          echo y # Set the bootable flag? (Y/N)
-          echo   # Enter an MBR hex code (default 83)
-          echo n # Set the bootable flag? (Y/N)
-          echo n # Unused partition space(s) found. Use one to protect more partitions? (Y/N)
-          echo w # write changes to disk
-          echo y # confirm
-          ) | sudo -E gdisk /dev/nbd1
-
-      - name: Disconnect ndb
-        run: |
-          sudo -E qemu-nbd -d /dev/nbd0
-          sudo -E qemu-nbd -d /dev/nbd1
-
-      - name: Remove old
-        run: |
-          rm -rf chr.qcow2
-
-      - name: Convert images
-        run: |
-          mkdir -p ./Firmware/
-          cp -f chr-efi.qcow2 ./Firmware/
-          qemu-img convert -f qcow2 -O vmdk chr-efi.qcow2 ./Firmware/chr-efi.vmdk
-          qemu-img convert -f qcow2 -O vpc chr-efi.qcow2 ./Firmware/chr-efi.vhd
-          qemu-img convert -f qcow2 -O vhdx chr-efi.qcow2 ./Firmware/chr-efi.vhdx
-          qemu-img convert -f qcow2 -O vdi chr-efi.qcow2 ./Firmware/chr-efi.vdi
-          qemu-img convert -f qcow2 -O raw chr-efi.qcow2 ./Firmware/chr-efi.img
-          ls -l ./Firmware
-
-      - name: Zip images
-        run: |
-          cd ./Firmware/
-          zip chr-${{matrix.version}}.qcow2.zip chr-efi.qcow2
-          zip chr-${{matrix.version}}.vmdk.zip chr-efi.vmdk
-          zip chr-${{matrix.version}}.vhd.zip chr-efi.vhd
-          zip chr-${{matrix.version}}.vhdx.zip chr-efi.vhdx
-          zip chr-${{matrix.version}}.vdi.zip chr-efi.vdi
-          zip chr-${{matrix.version}}.img.zip chr-efi.img
-          ls -l ./
-
-      - name: Upload Firmware to release
-        uses: ncipollo/release-action@v1
-        with:
-          name: ${{matrix.version}}_GPT
-          allowUpdates: true
-          removeArtifacts: true
-          tag: ${{matrix.version}}_GPT
-          commit: master
-          token: ${{ secrets.PERSONAL_TOKEN }}
-          artifacts: ./Firmware/*.zip
+      - name: Cache apt list
