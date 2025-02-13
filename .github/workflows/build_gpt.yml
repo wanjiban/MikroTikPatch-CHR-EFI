@@ -18,7 +18,7 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
-            // 获取 MikroTikPatch 仓库中所有 release，并筛选 tag_name 包含 "arm64" 的版本
+            // 从 MikroTikPatch 仓库中获取所有 release，并筛选 tag_name 包含 "arm64" 的版本
             const releases = await github.rest.repos.listReleases({
               owner: "elseif",
               repo: "MikroTikPatch"
@@ -32,7 +32,7 @@ jobs:
             const latestArm64 = arm64Releases[0];
             core.info(`Latest ARM64 release from MikroTikPatch: ${latestArm64.tag_name}`);
 
-            // 从当前仓库的 release 列表中获取最新发布记录
+            // 从当前仓库的 release 列表中获取最新发布记录，判断是否已构建
             let buildNeeded = "true";
             try {
               const currentReleases = await github.rest.repos.listReleases({
@@ -44,7 +44,7 @@ jobs:
                 currentReleases.data.sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
                 const latestCurrent = currentReleases.data[0];
                 core.info(`Latest release in current repository: ${latestCurrent.tag_name}`);
-                // 可根据实际情况对比 tag，比如上传时生成的 tag 带有 _GPT 后缀
+                // 判断 tag 是否与最新 ARM64 版本匹配（可能附加 _GPT 后缀）
                 if (latestCurrent.tag_name === latestArm64.tag_name || latestCurrent.tag_name === `${latestArm64.tag_name}_GPT`) {
                   core.info("当前仓库 release 已包含最新的 ARM64 版本，无需重复构建。");
                   buildNeeded = "false";
@@ -188,13 +188,3 @@ jobs:
           commit: master
           token: ${{ secrets.PERSONAL_TOKEN }}
           artifacts: Firmware/*.zip
-
-      - name: Update latest_version.txt
-        run: |
-          VERSION=${{ needs.check.outputs.version }}
-          echo $VERSION > latest_version.txt
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add latest_version.txt
-          git commit -m "Update latest version to $VERSION" || echo "No changes to update"
-          git push origin HEAD:master
