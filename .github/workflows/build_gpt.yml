@@ -1,4 +1,4 @@
-name: build GPT
+name: build GPT ARM64
 
 on:
   workflow_dispatch:
@@ -7,151 +7,156 @@ on:
 
 jobs:
   build:
-    name: Build ${{matrix.version}}
+    name: Build ${{ steps.get_release.outputs.version }}
     runs-on: ubuntu-latest
-    if: github.event.repository.owner.id == github.event.sender.id || ! github.event.sender.id
-
-    strategy:
-      fail-fast: false
-      # max-parallel: 2
-      matrix:
-        version:
-          # - 6.49.10
-          - 7.17-arm64
+    if: github.event.repository.owner.id == github.event.sender.id || !github.event.sender.id
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Get latest ARM64 release version
+        id: get_release
+        uses: actions/github-script@v6
+        with:
+          script: |
+            // 获取所有 release，并筛选 tag_name 包含 "arm64" 的第一个（最新版本）
+            const releases = await github.rest.repos.listReleases({
+              owner: "elseif",
+              repo: "MikroTikPatch"
+            });
+            const latestArm64 = releases.data.find(release => release.tag_name.includes("arm64"));
+            if (!latestArm64) {
+              core.setFailed("No ARM64 release found");
+            }
+            core.info(`Latest ARM64 release: ${latestArm64.tag_name}`);
+            return { version: latestArm64.tag_name };
+
       - name: Check server configuration
         run: |
           echo -e "--------------------------CPU Info--------------------------"
-          echo "CPU Physical Num: $(cat /proc/cpuinfo| grep "physical id"| sort| uniq| wc -l)"
-          echo -e "CPU Core Num: $(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
+          echo "CPU Physical Num: $(grep 'physical id' /proc/cpuinfo | sort -u | wc -l)"
+          echo -e "CPU Core Num: $(grep 'model name' /proc/cpuinfo | uniq -c) \n"
           echo "--------------------------Memory Info--------------------------"
           echo "Installed Memory Details:"
           sudo lshw -short -C memory | grep GiB
-          echo -e "\n"
-          echo "---------------------------Disk Info---------------------------"
-          echo -e  "Disk Num: $(ls /dev/sd* | grep -v [1-9] | wc -l) \n"
-          echo "Disk Details:"
+          echo -e "\n---------------------------Disk Info---------------------------"
+          echo -e "Disk Num: $(ls /dev/sd* | grep -v [1-9] | wc -l) \n"
           df -Th
 
       - name: Initialize environment
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo -E apt update
-          sudo -E apt -y install curl qemu-utils rsync unzip zip
-          sudo -E timedatectl set-timezone "Asia/Shanghai"
+          sudo apt update
+          sudo apt -y install curl qemu-utils rsync unzip zip
+          sudo timedatectl set-timezone "Asia/Shanghai"
 
       - name: Load nbd module
-        run: |
-          sudo -E modprobe nbd
+        run: sudo modprobe nbd
 
       - name: Download
         run: |
-          curl -skL --retry 3 --connect-timeout 3 -o chr.img.zip https://fw.wifihell.com:1111/MikroTik/MikroTikPatch/${{matrix.version}}/chr-${{matrix.version}}.img.zip
-          unzip chr.*.zip
-          rm -rf chr.*.zip
+          echo "Downloading version ${{ steps.get_release.outputs.version }}"
+          # 使用正确的 GitHub Release 下载链接格式
+          curl -skL --retry 3 --connect-timeout 3 \
+            -o chr.img.zip \
+            https://github.com/elseif/MikroTikPatch/releases/download/${{ steps.get_release.outputs.version }}/chr-${{ steps.get_release.outputs.version }}.img.zip
+          unzip chr.img.zip
+          rm -f chr.img.zip
 
       - name: Convert to qcow2
         run: |
           qemu-img convert -f raw -O qcow2 chr-*.img chr.qcow2
           cp -af chr.qcow2 chr-efi.qcow2
-          rm -rf chr-*.img
+          rm -f chr-*.img
 
-      - name: Connect ndb
+      - name: Connect nbd
         run: |
-          sudo -E qemu-nbd -c /dev/nbd0 chr.qcow2
-          sudo -E qemu-nbd -c /dev/nbd1 chr-efi.qcow2
+          sudo qemu-nbd -c /dev/nbd0 chr.qcow2
+          sudo qemu-nbd -c /dev/nbd1 chr-efi.qcow2
 
       - name: Format boot partition
-        run: |
-          sudo -E mkfs -t fat /dev/nbd1p1
+        run: sudo mkfs -t fat /dev/nbd1p1
 
       - name: Create tmp dir
         run: |
-          sudo -E rm -rf /tmp/chr*
-          sudo -E mkdir /tmp/chr-bios/
-          sudo -E mkdir /tmp/chr-efi/
+          sudo rm -rf /tmp/chr*
+          sudo mkdir -p /tmp/chr-bios/ /tmp/chr-efi/
 
       - name: Mount
         run: |
-          sudo -E mount /dev/nbd0p1 /tmp/chr-bios/
-          sudo -E mount /dev/nbd1p1 /tmp/chr-efi/
+          sudo mount /dev/nbd0p1 /tmp/chr-bios/
+          sudo mount /dev/nbd1p1 /tmp/chr-efi/
 
       - name: Sync files
-        run: |
-          sudo -E rsync -a /tmp/chr-bios/ /tmp/chr-efi/
+        run: sudo rsync -a /tmp/chr-bios/ /tmp/chr-efi/
 
       - name: Umount
         run: |
-          sudo -E umount /dev/nbd0p1
-          sudo -E umount /dev/nbd1p1
+          sudo umount /dev/nbd0p1
+          sudo umount /dev/nbd1p1
 
-      - name: remove tmp dir
-        run: |
-          sudo -E rm -rf /tmp/chr*
+      - name: Remove tmp dir
+        run: sudo rm -rf /tmp/chr*
 
-      - name: modify partition table
+      - name: Modify partition table
         run: |
           (
-          echo 2 # use GPT
-          echo t # change partition code
-          echo 1 # select first partition
-          echo 8300 # change code to Linux filesystem 8300
-          echo r # Recovery/transformation
-          echo h # Hybrid MBR
-          echo 1 2 # partitions added to the hybrid MBR
-          echo n # Place EFI GPT (0xEE) partition first in MBR (good for GRUB)? (Y/N)
-          echo   # Enter an MBR hex code (default 83)
-          echo y # Set the bootable flag? (Y/N)
-          echo   # Enter an MBR hex code (default 83)
-          echo n # Set the bootable flag? (Y/N)
-          echo n # Unused partition space(s) found. Use one to protect more partitions? (Y/N)
-          echo w # write changes to disk
-          echo y # confirm
-          ) | sudo -E gdisk /dev/nbd1
+          echo 2     # 使用 GPT
+          echo t     # 修改分区代码
+          echo 1     # 选择第一个分区
+          echo 8300  # 修改代码为 Linux 文件系统 8300
+          echo r     # Recovery/transformation
+          echo h     # Hybrid MBR
+          echo 1 2   # 添加分区到 Hybrid MBR
+          echo n     # 将 EFI GPT (0xEE) 分区放到 MBR 首位？(Y/N)
+          echo       # 默认 MBR 十六进制代码 83
+          echo y     # 设置可启动标志？(Y/N)
+          echo       # 默认 MBR 十六进制代码 83
+          echo n     # 不设置可启动标志？(Y/N)
+          echo n     # 未使用的分区空间保护更多分区？(Y/N)
+          echo w     # 写入更改
+          echo y     # 确认
+          ) | sudo gdisk /dev/nbd1
 
-      - name: Disconnect ndb
+      - name: Disconnect nbd
         run: |
-          sudo -E qemu-nbd -d /dev/nbd0
-          sudo -E qemu-nbd -d /dev/nbd1
+          sudo qemu-nbd -d /dev/nbd0
+          sudo qemu-nbd -d /dev/nbd1
 
-      - name: Remove old
-        run: |
-          rm -rf chr.qcow2
+      - name: Remove old image
+        run: rm -f chr.qcow2
 
       - name: Convert images
         run: |
-          mkdir -p ./Firmware/
-          cp -f chr-efi.qcow2 ./Firmware/
-          qemu-img convert -f qcow2 -O vmdk chr-efi.qcow2 ./Firmware/chr-efi.vmdk
-          qemu-img convert -f qcow2 -O vpc chr-efi.qcow2 ./Firmware/chr-efi.vhd
-          qemu-img convert -f qcow2 -O vhdx chr-efi.qcow2 ./Firmware/chr-efi.vhdx
-          qemu-img convert -f qcow2 -O vdi chr-efi.qcow2 ./Firmware/chr-efi.vdi
-          qemu-img convert -f qcow2 -O raw chr-efi.qcow2 ./Firmware/chr-efi.img
-          ls -l ./Firmware
+          mkdir -p Firmware/
+          cp -f chr-efi.qcow2 Firmware/
+          qemu-img convert -f qcow2 -O vmdk chr-efi.qcow2 Firmware/chr-efi.vmdk
+          qemu-img convert -f qcow2 -O vpc chr-efi.qcow2 Firmware/chr-efi.vhd
+          qemu-img convert -f qcow2 -O vhdx chr-efi.qcow2 Firmware/chr-efi.vhdx
+          qemu-img convert -f qcow2 -O vdi chr-efi.qcow2 Firmware/chr-efi.vdi
+          qemu-img convert -f qcow2 -O raw chr-efi.qcow2 Firmware/chr-efi.img
+          ls -l Firmware/
 
       - name: Zip images
         run: |
-          cd ./Firmware/
-          zip chr-${{matrix.version}}.qcow2.zip chr-efi.qcow2
-          zip chr-${{matrix.version}}.vmdk.zip chr-efi.vmdk
-          zip chr-${{matrix.version}}.vhd.zip chr-efi.vhd
-          zip chr-${{matrix.version}}.vhdx.zip chr-efi.vhdx
-          zip chr-${{matrix.version}}.vdi.zip chr-efi.vdi
-          zip chr-${{matrix.version}}.img.zip chr-efi.img
-          ls -l ./
+          cd Firmware/
+          zip chr-${{ steps.get_release.outputs.version }}.qcow2.zip chr-efi.qcow2
+          zip chr-${{ steps.get_release.outputs.version }}.vmdk.zip chr-efi.vmdk
+          zip chr-${{ steps.get_release.outputs.version }}.vhd.zip chr-efi.vhd
+          zip chr-${{ steps.get_release.outputs.version }}.vhdx.zip chr-efi.vhdx
+          zip chr-${{ steps.get_release.outputs.version }}.vdi.zip chr-efi.vdi
+          zip chr-${{ steps.get_release.outputs.version }}.img.zip chr-efi.img
+          ls -l .
 
       - name: Upload Firmware to release
         uses: ncipollo/release-action@v1
         with:
-          name: ${{matrix.version}}_GPT
+          name: ${{ steps.get_release.outputs.version }}_GPT
           allowUpdates: true
           removeArtifacts: true
-          tag: ${{matrix.version}}_GPT
+          tag: ${{ steps.get_release.outputs.version }}_GPT
           commit: master
           token: ${{ secrets.PERSONAL_TOKEN }}
-          artifacts: ./Firmware/*.zip
+          artifacts: Firmware/*.zip
